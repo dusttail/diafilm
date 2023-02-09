@@ -10,7 +10,7 @@ export class BaseModel extends Model {
     })
     id: ID;
     @CreatedAt
-    createdAt: Date;
+    created_at: Date;
     @UpdatedAt
-    updatedAt: Date;
+    updated_at: Date;
 }

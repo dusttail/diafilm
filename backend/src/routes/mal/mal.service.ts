@@ -11,8 +11,8 @@ import { Genre } from 'src/database/models/genre.model';
 import { MediaType } from 'src/database/models/media_types.model';
 import { Synonym } from 'src/database/models/synonym.model';
 import { alphabeticalThreeStringQueryGenerator } from 'src/utils/guery_generator';
-import { sleep } from 'src/utils/sleep';
 import { AnimeNode, MALResponseAnime } from './interfaces';
+import { isMediaTypeExist } from './sql/media_type';
 
 @Injectable()
 export class MALService {
@@ -42,13 +42,14 @@ export class MALService {
 
         do {
             q = query.next();
+            if (q.done) break;
             let res;
             let offset = 0;
             do {
-                await sleep(1000);
                 res = await this.fetchAnimeList(q.value, LIMIT, offset);
                 await this.saveToDatabase(res.data.data);
                 offset += LIMIT;
+                return;
             } while (res.data.paging.next);
         } while (!q.done);
     }
@@ -67,6 +68,7 @@ export class MALService {
                 }
             });
         } catch (e) {
+            console.log(e);
             throw new InternalServerErrorException(e.message);
         }
     }
@@ -77,14 +79,15 @@ export class MALService {
                 const { node } = item;
 
                 const mediaTypeId = await this.setMediaType(node, transaction);
-                const animeId = await this.setAnime(node, mediaTypeId, transaction);
-                await this.setSynonyms(node, animeId, transaction);
-                await this.setGenres(node, animeId, transaction);
+                // const animeId = await this.setAnime(node, mediaTypeId, transaction);
+                // await this.setSynonyms(node, animeId, transaction);
+                // await this.setGenres(node, animeId, transaction);
             }
         });
     }
 
     async setGenres(node: AnimeNode, animeId: ID, transaction: Transaction) {
+        if (!node.genres) return;
         for (const nodeGenre of node.genres) {
             let genre = await this.genreModel.findOne({ where: { name: nodeGenre.name }, transaction });
             if (!genre) genre = await this.genreModel.create({ name: nodeGenre.name }, { transaction });
@@ -93,11 +96,10 @@ export class MALService {
     }
 
     async setSynonyms(node: AnimeNode, animeId: ID, transaction: Transaction) {
-        console.log(node.alternative_titles);
-
         let mainTitleSynonym = await this.synonymModel.findOne({ where: { title: node.title }, transaction });
         if (!mainTitleSynonym) mainTitleSynonym = await this.synonymModel.create({ title: node.title }, { transaction });
         await this.animesToSynonymModel.findOrCreate({ where: { anime_id: animeId, synonym_id: mainTitleSynonym.id }, transaction });
+        if (!node.alternative_titles) return;
         if (node.alternative_titles?.en) {
             let synonym = await this.synonymModel.findOne({ where: { title: node.alternative_titles.en, lang: 'en' }, transaction });
             if (!synonym) synonym = await this.synonymModel.create({ title: node.alternative_titles.en, lang: 'en' }, { transaction });
@@ -109,6 +111,7 @@ export class MALService {
             await this.animesToSynonymModel.findOrCreate({ where: { anime_id: animeId, synonym_id: synonym.id }, transaction });
         }
         if (node.alternative_titles?.synonyms) {
+            if (!node.alternative_titles.synonyms || !node.alternative_titles.synonyms.length) return;
             for (const synonymTitle of node.alternative_titles.synonyms) {
                 let synonym = await this.synonymModel.findOne({ where: { title: synonymTitle }, transaction });
                 if (!synonym) synonym = await this.synonymModel.create({ title: synonymTitle }, { transaction });
@@ -118,6 +121,16 @@ export class MALService {
     }
 
     async setMediaType(node: AnimeNode, transaction: Transaction): Promise<ID> {
+        console.log('TEST', node.media_type);
+        console.log(isMediaTypeExist(node.media_type));
+        const { exist } = await this.sequelize.query(isMediaTypeExist(node.media_type), {
+            transaction,
+            raw: true,
+            plain: true
+        });
+        console.log(exist);
+        console.log('TEST END');
+
         let mediaType = await this.mediaTypeModel.findOne({ where: { name: node.media_type }, transaction });
         if (!mediaType) mediaType = await this.mediaTypeModel.create({ name: node.media_type }, { transaction });
         return mediaType.id;

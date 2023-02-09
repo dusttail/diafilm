@@ -1,24 +1,21 @@
 'use strict';
 
 module.exports = {
-  async up(queryInterface, Sequelize) {
-    await queryInterface.createTable('Synonyms', {
-      id: {
-        type: Sequelize.DataTypes.INTEGER.UNSIGNED,
-        autoIncrement: true,
-        primaryKey: true,
-        allowNull: false,
-        unique: true,
-      },
-      title: {
-        type: Sequelize.DataTypes.STRING,
-        allowNull: false,
-      },
-      lang: Sequelize.DataTypes.STRING(3),
-    });
-  },
+    async up(queryInterface) {
+        const sql = `
+            CREATE TABLE IF NOT EXISTS Synonyms (
+                id INTEGER UNSIGNED AUTO_INCREMENT,
+                title VARCHAR(255) NOT NULL,
+                lang VARCHAR(3),
+                PRIMARY KEY (id),
+                INDEX (title)
+            ) ENGINE=INNODB CHARACTER SET=UTF8MB4 COLLATE UTF8MB4_UNICODE_CI;
+        `;
 
-  async down(queryInterface) {
-    await queryInterface.dropTable('Synonyms');
-  }
+        await queryInterface.sequelize.query(sql);
+    },
+
+    async down(queryInterface) {
+        await queryInterface.sequelize.query('DROP TABLE IF EXISTS Synonyms;');
+    }
 };
