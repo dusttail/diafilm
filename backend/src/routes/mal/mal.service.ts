@@ -12,7 +12,6 @@ import { MediaType } from 'src/database/models/media_types.model';
 import { Synonym } from 'src/database/models/synonym.model';
 import { alphabeticalThreeStringQueryGenerator } from 'src/utils/guery_generator';
 import { AnimeNode, MALResponseAnime } from './interfaces';
-import { isMediaTypeExist } from './sql/media_type';
 
 @Injectable()
 export class MALService {
@@ -36,6 +35,11 @@ export class MALService {
     private readonly baseUrl = 'https://api.myanimelist.net/v2';
 
     async sync() {
+        const cache = {
+            mediaTypes: new Map<string, ID>(),
+            genres: new Map<string, ID>()
+        };
+
         const LIMIT = 100;
         const query = alphabeticalThreeStringQueryGenerator();
         let q;
@@ -47,9 +51,8 @@ export class MALService {
             let offset = 0;
             do {
                 res = await this.fetchAnimeList(q.value, LIMIT, offset);
-                await this.saveToDatabase(res.data.data);
+                await this.saveToDatabase(res.data.data, cache);
                 offset += LIMIT;
-                return;
             } while (res.data.paging.next);
         } while (!q.done);
     }
@@ -73,72 +76,74 @@ export class MALService {
         }
     }
 
-    async saveToDatabase(data: any[]) {
+    async saveToDatabase(data: any[], cache: { mediaTypes: Map<string, ID>; genres: Map<string, ID>; }) {
         await this.sequelize.transaction(async (transaction) => {
             for (const item of data) {
                 const { node } = item;
 
-                const mediaTypeId = await this.setMediaType(node, transaction);
-                // const animeId = await this.setAnime(node, mediaTypeId, transaction);
-                // await this.setSynonyms(node, animeId, transaction);
-                // await this.setGenres(node, animeId, transaction);
+                let mediaTypeId = cache.mediaTypes.get(node.media_type);
+                if (!mediaTypeId) {
+                    const mediaType = await this.createMediaType(node, transaction);
+                    cache.mediaTypes.set(mediaType[1], mediaType[0]);
+                    mediaTypeId = mediaType[0];
+                }
+
+                const { animeId, created } = await this.createAnime(node, mediaTypeId, transaction);
+                if (!created) continue;
+
+                const genreTypesLinks = [];
+                if (node.genres) for (const nodeGenre of node.genres) {
+                    let genreId = cache.genres.get(nodeGenre.name);
+                    if (!genreId) {
+                        const genre = await this.createGenre(nodeGenre.name, transaction);
+                        cache.genres.set(genre[1], genre[0]);
+                        genreId = genre[0];
+                    }
+                    genreTypesLinks.push({ anime_id: animeId, genre_id: genreId });
+                }
+                if (genreTypesLinks.length) await this.linkAnimeToGenres(genreTypesLinks, transaction);
+
+                await this.createSynonyms(node, animeId, transaction);
             }
         });
     }
 
-    async setGenres(node: AnimeNode, animeId: ID, transaction: Transaction) {
-        if (!node.genres) return;
-        for (const nodeGenre of node.genres) {
-            let genre = await this.genreModel.findOne({ where: { name: nodeGenre.name }, transaction });
-            if (!genre) genre = await this.genreModel.create({ name: nodeGenre.name }, { transaction });
-            await this.animesToGenreModel.findOrCreate({ where: { anime_id: animeId, genre_id: genre.id }, transaction });
-        }
+    async createGenre(name: string, transaction: Transaction) {
+        let genre = await this.genreModel.findOne({ where: { name }, transaction });
+        if (!genre) genre = await this.genreModel.create({ name }, { transaction });
+        return [genre.id, genre.name] as const;
     }
 
-    async setSynonyms(node: AnimeNode, animeId: ID, transaction: Transaction) {
-        let mainTitleSynonym = await this.synonymModel.findOne({ where: { title: node.title }, transaction });
-        if (!mainTitleSynonym) mainTitleSynonym = await this.synonymModel.create({ title: node.title }, { transaction });
-        await this.animesToSynonymModel.findOrCreate({ where: { anime_id: animeId, synonym_id: mainTitleSynonym.id }, transaction });
-        if (!node.alternative_titles) return;
-        if (node.alternative_titles?.en) {
-            let synonym = await this.synonymModel.findOne({ where: { title: node.alternative_titles.en, lang: 'en' }, transaction });
-            if (!synonym) synonym = await this.synonymModel.create({ title: node.alternative_titles.en, lang: 'en' }, { transaction });
-            await this.animesToSynonymModel.findOrCreate({ where: { anime_id: animeId, synonym_id: synonym.id }, transaction });
-        }
-        if (node.alternative_titles?.ja) {
-            let synonym = await this.synonymModel.findOne({ where: { title: node.alternative_titles.ja, lang: 'ja' }, transaction });
-            if (!synonym) synonym = await this.synonymModel.create({ title: node.alternative_titles.ja, lang: 'ja' }, { transaction });
-            await this.animesToSynonymModel.findOrCreate({ where: { anime_id: animeId, synonym_id: synonym.id }, transaction });
-        }
-        if (node.alternative_titles?.synonyms) {
-            if (!node.alternative_titles.synonyms || !node.alternative_titles.synonyms.length) return;
-            for (const synonymTitle of node.alternative_titles.synonyms) {
-                let synonym = await this.synonymModel.findOne({ where: { title: synonymTitle }, transaction });
-                if (!synonym) synonym = await this.synonymModel.create({ title: synonymTitle }, { transaction });
-                await this.animesToSynonymModel.findOrCreate({ where: { anime_id: animeId, synonym_id: synonym.id }, transaction });
-            }
-        }
+    async linkAnimeToGenres(links: { anime_id: ID, genre_id: ID; }[], transaction: Transaction): Promise<void> {
+        await this.animesToGenreModel.bulkCreate(links, { transaction });
     }
 
-    async setMediaType(node: AnimeNode, transaction: Transaction): Promise<ID> {
-        console.log('TEST', node.media_type);
-        console.log(isMediaTypeExist(node.media_type));
-        const { exist } = await this.sequelize.query(isMediaTypeExist(node.media_type), {
-            transaction,
-            raw: true,
-            plain: true
-        });
-        console.log(exist);
-        console.log('TEST END');
+    async createSynonyms(node: AnimeNode, animeId: ID, transaction: Transaction) {
+        const synonymsData = [];
+        if (node?.title) synonymsData.push({ title: node.title });
+        if (node?.alternative_titles) {
+            if (node.alternative_titles?.en) synonymsData.push({ title: node.alternative_titles.en, lang: 'en' });
+            if (node.alternative_titles?.ja) synonymsData.push({ title: node.alternative_titles.ja, lang: 'ja' });
+            if (node.alternative_titles?.synonyms && node.alternative_titles.synonyms.length) node.alternative_titles.synonyms.forEach((title) => synonymsData.push({ title }));
+        }
+        const synonymLinks = [];
+        for (const data of synonymsData) {
+            const synonym = await this.synonymModel.create(data, { transaction });
+            synonymLinks.push({ anime_id: animeId, synonym_id: synonym.id });
+        }
+        await this.animesToSynonymModel.bulkCreate(synonymLinks, { transaction });
+    }
 
+    async createMediaType(node: AnimeNode, transaction: Transaction) {
         let mediaType = await this.mediaTypeModel.findOne({ where: { name: node.media_type }, transaction });
         if (!mediaType) mediaType = await this.mediaTypeModel.create({ name: node.media_type }, { transaction });
-        return mediaType.id;
+        return [mediaType.id, mediaType.name] as const;
     }
 
-    async setAnime(node: AnimeNode, mediaTypeId: ID, transaction: Transaction): Promise<ID> {
+    async createAnime(node: AnimeNode, mediaTypeId: ID, transaction: Transaction): Promise<{ animeId: ID; created: boolean; }> {
+        const res = { animeId: null, created: false };
         let anime = await this.animeModel.findOne({ where: { title: node.title }, transaction });
-        if (anime) await anime.update({
+        if (anime && anime.mal_scoring_users !== node?.num_scoring_users) await anime.update({
             picture: node?.main_picture?.medium,
             large_picture: node?.main_picture?.large,
             media_type_id: mediaTypeId,
@@ -146,16 +151,20 @@ export class MALService {
             mal_scoring_users: node?.num_scoring_users,
             nsfw: getNSFWServerValue(node?.nsfw)
         }, { transaction });
-        if (!anime) anime = await this.animeModel.create({
-            title: node.title,
-            picture: node?.main_picture?.medium,
-            large_picture: node?.main_picture?.large,
-            media_type_id: mediaTypeId,
-            mal_score: node?.mean,
-            mal_scoring_users: node?.num_scoring_users,
-            nsfw: getNSFWServerValue(node?.nsfw)
-        }, { transaction });
-        return anime.id;
+        if (!anime) {
+            anime = await this.animeModel.create({
+                title: node.title,
+                picture: node?.main_picture?.medium,
+                large_picture: node?.main_picture?.large,
+                media_type_id: mediaTypeId,
+                mal_score: node?.mean,
+                mal_scoring_users: node?.num_scoring_users,
+                nsfw: getNSFWServerValue(node?.nsfw)
+            }, { transaction });
+            res.created = true;
+        }
+        res.animeId = anime.id;
+        return res;
     }
 }
 
