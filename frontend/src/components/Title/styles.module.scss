@@ -1,0 +1,17 @@
+.title_holder {
+  position: absolute;
+  top: 35dvh;
+  left: 50%;
+  transform: translate(-50%);
+  font-family: $FONT;
+  font-size: 48px;
+  font-weight: $FONT_BOLD;
+}
+
+.dia {
+  color: $SECONDARY_VARIANT;
+}
+
+.film {
+  color: $PRIMARY_VARIANT;
+}
